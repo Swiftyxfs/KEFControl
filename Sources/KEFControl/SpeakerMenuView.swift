@@ -66,10 +66,30 @@ struct SpeakerMenuView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button("Retry") {
-                appState.startConnection()
+            HStack(spacing: 12) {
+                if appState.speakerMAC != nil {
+                    Button("Wake Speaker") {
+                        appState.wakeSpeaker()
+                    }
+                    .controlSize(.small)
+                    .disabled(appState.isBusy)
+                }
+
+                Button("Retry") {
+                    appState.startConnection()
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
+
+            if appState.isBusy {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Waking speaker...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .frame(maxWidth: .infinity)
     }

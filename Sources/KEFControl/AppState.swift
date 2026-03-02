@@ -225,4 +225,37 @@ final class AppState: ObservableObject {
             await refresh()
         }
     }
+
+    // MARK: - Wake-on-LAN
+
+    /// The MAC address of the discovered (or connected) speaker, if known.
+    var speakerMAC: String? {
+        // Check discovered speakers for a MAC
+        if let first = discovery.speakers.first, let mac = first.macAddress {
+            return mac
+        }
+        return nil
+    }
+
+    func wakeSpeaker() {
+        guard let mac = speakerMAC else { return }
+        isBusy = true
+        Task {
+            _ = sendWakeOnLAN(macAddress: mac)
+            // Wait for the speaker to boot, then try connecting
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .seconds(1))
+                if let host = currentHost ?? discovery.speakers.first?.host {
+                    let api = KEFSpeakerAPI(host: host)
+                    if await api.testConnection() {
+                        connect(to: host)
+                        isBusy = false
+                        return
+                    }
+                }
+            }
+            isBusy = false
+            connectionError = "Speaker did not wake up"
+        }
+    }
 }

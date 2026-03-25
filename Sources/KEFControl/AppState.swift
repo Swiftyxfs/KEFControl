@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
     @Published var status: SpeakerStatus = .standby
     @Published var source: SpeakerSource = .wifi
     @Published var volume: Int = 0
+    @Published private(set) var displayedVolume: Int = 0
     @Published var isPlaying = false
     @Published var nowPlaying: NowPlayingInfo?
 
@@ -30,6 +31,8 @@ final class AppState: ObservableObject {
     // Internal
     private var speaker: KEFSpeakerAPI?
     private var pollTask: Task<Void, Never>?
+    private var pendingCommittedVolume: Int?
+    private var pendingVolumeResetTask: Task<Void, Never>?
 
     init() {
         startConnection()
@@ -92,9 +95,11 @@ final class AppState: ObservableObject {
         status = .standby
         source = .wifi
         volume = 0
+        displayedVolume = 0
         isPlaying = false
         nowPlaying = nil
         isBusy = false
+        clearPendingVolume(keepDisplayedVolume: false)
     }
 
     // MARK: - Polling
@@ -122,7 +127,9 @@ final class AppState: ObservableObject {
 
             self.status = try await s
             self.source = try await src
-            self.volume = try await vol
+            let refreshedVolume = try await vol
+            self.volume = refreshedVolume
+            syncDisplayedVolume(with: refreshedVolume)
             self.speakerName = try await name
             let modelFw = try await mf
             self.speakerModel = modelFw.model
@@ -160,16 +167,29 @@ final class AppState: ObservableObject {
     // MARK: - Actions
 
     func commitVolume(_ newVolume: Int) {
-        volume = newVolume
+        let clampedVolume = max(0, min(100, newVolume))
+        volume = clampedVolume
+        displayedVolume = clampedVolume
+        pendingCommittedVolume = clampedVolume
+        pendingVolumeResetTask?.cancel()
+        pendingVolumeResetTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self else { return }
+            if self.pendingCommittedVolume == clampedVolume {
+                self.clearPendingVolume()
+            }
+        }
+
         guard let speaker else { return }
         Task {
-            try? await speaker.setVolume(newVolume)
+            try? await speaker.setVolume(clampedVolume)
         }
     }
 
     func setSource(_ newSource: SpeakerSource) {
         guard let speaker else { return }
         let oldSource = source
+        clearPendingVolume()
         isBusy = true
         Task {
             try? await speaker.setSource(newSource)
@@ -227,6 +247,27 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Wake-on-LAN
+
+    private func syncDisplayedVolume(with remoteVolume: Int) {
+        if let pendingCommittedVolume {
+            if remoteVolume == pendingCommittedVolume {
+                clearPendingVolume()
+            } else {
+                displayedVolume = pendingCommittedVolume
+            }
+        } else {
+            displayedVolume = remoteVolume
+        }
+    }
+
+    private func clearPendingVolume(keepDisplayedVolume: Bool = true) {
+        pendingCommittedVolume = nil
+        pendingVolumeResetTask?.cancel()
+        pendingVolumeResetTask = nil
+        if keepDisplayedVolume {
+            displayedVolume = volume
+        }
+    }
 
     /// The MAC address of the discovered (or connected) speaker, if known.
     var speakerMAC: String? {

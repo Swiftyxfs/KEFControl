@@ -29,13 +29,13 @@ struct SpeakerMenuView: View {
         }
         .padding(12)
         .frame(width: 280)
-        .onChange(of: appState.volume) { _, newValue in
+        .onChange(of: appState.displayedVolume) { _, newValue in
             if !isDraggingVolume {
                 sliderVolume = Double(newValue)
             }
         }
         .onAppear {
-            sliderVolume = Double(appState.volume)
+            sliderVolume = Double(appState.displayedVolume)
         }
     }
 
@@ -149,23 +149,7 @@ struct SpeakerMenuView: View {
                     .disabled(appState.isBusy)
                 }
 
-                // Volume
-                HStack(spacing: 8) {
-                    Image(systemName: volumeIcon)
-                        .frame(width: 16)
-                        .foregroundStyle(.secondary)
-
-                    Slider(value: $sliderVolume, in: 0...100, step: 1) { editing in
-                        isDraggingVolume = editing
-                        if !editing {
-                            appState.commitVolume(Int(sliderVolume))
-                        }
-                    }
-
-                    Text("\(Int(sliderVolume))")
-                        .font(.caption.monospacedDigit())
-                        .frame(width: 24, alignment: .trailing)
-                }
+                volumeControl
 
                 // Now playing
                 if appState.isPlaying, let np = appState.nowPlaying, np.hasInfo {
@@ -197,6 +181,42 @@ struct SpeakerMenuView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var volumeControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Volume")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Image(systemName: volumeIcon)
+                    .frame(width: 16)
+                    .foregroundStyle(.secondary)
+
+                Slider(value: $sliderVolume, in: 0...100, step: 5) { editing in
+                    isDraggingVolume = editing
+                    if !editing {
+                        appState.commitVolume(Int(sliderVolume))
+                    }
+                }
+
+                Text("\(Int(sliderVolume))")
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 32, alignment: .trailing)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+        )
     }
 
     private var volumeIcon: String {

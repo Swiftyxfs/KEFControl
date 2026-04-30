@@ -42,16 +42,25 @@ enum SpeakerStatus: String {
 enum KEFError: LocalizedError {
     case invalidResponse
     case connectionFailed
+    case apiError(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidResponse: "Invalid response from speaker"
         case .connectionFailed: "Could not connect to speaker"
+        case .apiError(let message): message
         }
     }
 }
 
 final class KEFSpeakerAPI: Sendable {
+    private static let postSetDataModels: Set<String> = ["LS50WII", "LSXII", "LSXIILT"]
+    private static let modelAliases: [String: String] = [
+        "LS50W2": "LS50WII",
+        "LSX2": "LSXII",
+        "LSX2LT": "LSXIILT",
+    ]
+
     let host: String
     private let session: URLSession
 
@@ -80,17 +89,63 @@ final class KEFSpeakerAPI: Sendable {
         return json
     }
 
-    private func setData(path: String, roles: String = "value", value: String) async throws {
+    private func setData(path: String, roles: String = "value", value: [String: Any]) async throws {
+        if try await usesPostForSetData() {
+            try await postSetData(path: path, roles: roles, value: value)
+        } else {
+            try await getSetData(path: path, roles: roles, value: value)
+        }
+    }
+
+    private func getSetData(path: String, roles: String, value: [String: Any]) async throws {
         guard var components = URLComponents(string: "http://\(host)/api/setData") else {
             throw KEFError.connectionFailed
+        }
+        let valueData = try JSONSerialization.data(withJSONObject: value)
+        guard let valueString = String(data: valueData, encoding: .utf8) else {
+            throw KEFError.invalidResponse
         }
         components.queryItems = [
             URLQueryItem(name: "path", value: path),
             URLQueryItem(name: "roles", value: roles),
-            URLQueryItem(name: "value", value: value),
+            URLQueryItem(name: "value", value: valueString),
         ]
         guard let url = components.url else { throw KEFError.connectionFailed }
-        _ = try await session.data(from: url)
+        let (data, _) = try await session.data(from: url)
+        try validateSetDataResponse(data)
+    }
+
+    private func postSetData(path: String, roles: String, value: [String: Any]) async throws {
+        guard let url = URL(string: "http://\(host)/api/setData") else {
+            throw KEFError.connectionFailed
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "path": path,
+            "roles": roles,
+            "value": value,
+        ])
+
+        let (data, _) = try await session.data(for: request)
+        try validateSetDataResponse(data)
+    }
+
+    private func validateSetDataResponse(_ data: Data) throws {
+        guard !data.isEmpty else { return }
+        let response = try JSONSerialization.jsonObject(with: data)
+        if let responseObject = response as? [String: Any],
+           let error = responseObject["error"] as? [String: Any] {
+            let message = error["message"] as? String ?? "Speaker rejected command"
+            throw KEFError.apiError(message)
+        }
+    }
+
+    private func usesPostForSetData() async throws -> Bool {
+        let model = try await getModelAndFirmware().model
+        let normalizedModel = Self.modelAliases[model] ?? model
+        return Self.postSetDataModels.contains(normalizedModel)
     }
 
     // MARK: - Read
@@ -158,28 +213,28 @@ final class KEFSpeakerAPI: Sendable {
         let clamped = max(0, min(100, volume))
         try await setData(
             path: "player:volume",
-            value: "{\"type\":\"i32_\",\"i32_\":\(clamped)}"
+            value: ["type": "i32_", "i32_": clamped]
         )
     }
 
     func setSource(_ source: SpeakerSource) async throws {
         try await setData(
             path: "settings:/kef/play/physicalSource",
-            value: "{\"type\":\"kefPhysicalSource\",\"kefPhysicalSource\":\"\(source.rawValue)\"}"
+            value: ["type": "kefPhysicalSource", "kefPhysicalSource": source.rawValue]
         )
     }
 
     func powerOn() async throws {
         try await setData(
             path: "settings:/kef/play/physicalSource",
-            value: "{\"type\":\"kefPhysicalSource\",\"kefPhysicalSource\":\"powerOn\"}"
+            value: ["type": "kefPhysicalSource", "kefPhysicalSource": "powerOn"]
         )
     }
 
     func shutdown() async throws {
         try await setData(
             path: "settings:/kef/play/physicalSource",
-            value: "{\"type\":\"kefPhysicalSource\",\"kefPhysicalSource\":\"standby\"}"
+            value: ["type": "kefPhysicalSource", "kefPhysicalSource": "standby"]
         )
     }
 
@@ -187,7 +242,7 @@ final class KEFSpeakerAPI: Sendable {
         try await setData(
             path: "player:player/control",
             roles: "activate",
-            value: "{\"control\":\"pause\"}"
+            value: ["control": "pause"]
         )
     }
 
@@ -195,7 +250,7 @@ final class KEFSpeakerAPI: Sendable {
         try await setData(
             path: "player:player/control",
             roles: "activate",
-            value: "{\"control\":\"next\"}"
+            value: ["control": "next"]
         )
     }
 
@@ -203,7 +258,7 @@ final class KEFSpeakerAPI: Sendable {
         try await setData(
             path: "player:player/control",
             roles: "activate",
-            value: "{\"control\":\"previous\"}"
+            value: ["control": "previous"]
         )
     }
 

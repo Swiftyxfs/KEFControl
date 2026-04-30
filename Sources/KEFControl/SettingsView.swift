@@ -100,12 +100,111 @@ struct SettingsView: View {
                 }
                 .controlSize(.small)
             }
+
+            Section("Volume Keys") {
+                Toggle("Control speaker volume with keyboard volume keys", isOn: $appState.useVolumeKeys)
+
+                HStack {
+                    Label(mediaKeyStatusTitle, systemImage: mediaKeyStatusIcon)
+                        .foregroundStyle(mediaKeyStatusColor)
+                    Spacer()
+                    Button("Refresh Status") {
+                        appState.refreshMediaKeyAccessStatus()
+                    }
+                    .controlSize(.small)
+                    .disabled(!appState.useVolumeKeys)
+                }
+
+                Text(appState.mediaKeyAccessMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if appState.useVolumeKeys && appState.mediaKeyAccessState != .working {
+                    Button(mediaKeyActionTitle) {
+                        appState.requestMediaKeyAccess()
+                    }
+                    .controlSize(.small)
+                }
+
+                Text("macOS tracks media-key listening permission per app identity, so the Xcode-built app may need approval separately from swift run.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 440)
         .frame(minHeight: 300)
         .onAppear {
             ipField = appState.manualIP
+            appState.refreshMediaKeyAccessStatus()
+        }
+    }
+
+    private var mediaKeyStatusTitle: String {
+        if !appState.useVolumeKeys {
+            return "Off"
+        }
+
+        return switch appState.mediaKeyAccessState {
+        case .unknown:
+            "Checking"
+        case .working:
+            "Working"
+        case .permissionNeeded:
+            "Permission Needed"
+        case .permissionDenied:
+            "Permission Denied"
+        case .failedToActivate:
+            "Failed to Activate"
+        }
+    }
+
+    private var mediaKeyStatusIcon: String {
+        if !appState.useVolumeKeys {
+            return "speaker.slash"
+        }
+
+        return switch appState.mediaKeyAccessState {
+        case .unknown:
+            "questionmark.circle"
+        case .working:
+            "checkmark.circle.fill"
+        case .permissionNeeded:
+            "hand.raised.circle"
+        case .permissionDenied:
+            "exclamationmark.triangle.fill"
+        case .failedToActivate:
+            "xmark.circle.fill"
+        }
+    }
+
+    private var mediaKeyStatusColor: Color {
+        if !appState.useVolumeKeys {
+            return .secondary
+        }
+
+        return switch appState.mediaKeyAccessState {
+        case .unknown:
+            .secondary
+        case .working:
+            .green
+        case .permissionNeeded, .permissionDenied:
+            .orange
+        case .failedToActivate:
+            .red
+        }
+    }
+
+    private var mediaKeyActionTitle: String {
+        switch appState.mediaKeyAccessState {
+        case .permissionNeeded:
+            "Enable Media Key Access"
+        case .permissionDenied:
+            "Retry Permission Request"
+        case .failedToActivate:
+            "Retry Media Key Setup"
+        case .unknown, .working:
+            "Request Media Key Access"
         }
     }
 

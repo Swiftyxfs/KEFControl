@@ -1,7 +1,28 @@
+import AppKit
+import ApplicationServices
+import CoreGraphics
 import SwiftUI
 
 @MainActor
 final class AppState: ObservableObject {
+    enum MediaKeyAccessState {
+        case unknown
+        case working
+        case permissionNeeded
+        case permissionDenied
+        case failedToActivate
+    }
+
+    private enum MediaKey {
+        static let eventType = 14
+        static let eventSubtype = 8
+        static let volumeUp = 0
+        static let volumeDown = 1
+        static let keyDownState = 0xA
+        static let repeatMask = 0x1
+        static let volumeStep = 5
+    }
+
     // Connection
     @Published var isConnected = false
     @Published var connectionError: String?
@@ -24,6 +45,12 @@ final class AppState: ObservableObject {
     // Settings (persisted)
     @AppStorage("manualIP") var manualIP: String = ""
     @AppStorage("useAutoDiscovery") var useAutoDiscovery: Bool = true
+    @AppStorage("useVolumeKeys") var useVolumeKeys: Bool = true {
+        didSet {
+            refreshMediaKeyAccessStatus()
+        }
+    }
+    @AppStorage("hasRequestedMediaKeyAccess") private var hasRequestedMediaKeyAccess = false
 
     // Discovery
     let discovery = KEFDiscovery()
@@ -33,9 +60,76 @@ final class AppState: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var pendingCommittedVolume: Int?
     private var pendingVolumeResetTask: Task<Void, Never>?
+    private var mediaKeyEventTap: CFMachPort?
+    private var mediaKeyRunLoopSource: CFRunLoopSource?
+    private let volumeHUD = VolumeHUDController()
+    private var isVolumeHUDSuppressed = false
+
+    @Published private(set) var mediaKeyAccessState: MediaKeyAccessState = .unknown
+    @Published private(set) var mediaKeyAccessMessage = ""
 
     init() {
+        refreshMediaKeyAccessStatus()
         startConnection()
+    }
+
+    func setVolumeHUDSuppressed(_ suppressed: Bool) {
+        isVolumeHUDSuppressed = suppressed
+        if suppressed {
+            volumeHUD.hide()
+        }
+    }
+
+    func refreshMediaKeyAccessStatus() {
+        guard useVolumeKeys else {
+            invalidateMediaKeyEventTap()
+            mediaKeyAccessState = .unknown
+            mediaKeyAccessMessage = "Volume keys will control macOS system volume."
+            return
+        }
+
+        let hasListenAccess = CGPreflightListenEventAccess()
+
+        guard hasListenAccess else {
+            invalidateMediaKeyEventTap()
+            mediaKeyAccessState = hasRequestedMediaKeyAccess ? .permissionDenied : .permissionNeeded
+            mediaKeyAccessMessage = hasRequestedMediaKeyAccess
+                ? "KEFControl still does not have permission to listen for media keys. macOS tracks this per app build, so the Xcode-built app may need approval separately from swift run."
+                : "Allow KEFControl to listen for media keys so volume up/down can control your speaker."
+            return
+        }
+
+        if mediaKeyEventTap == nil {
+            installMediaKeyEventTap()
+        }
+
+        if mediaKeyEventTap != nil {
+            mediaKeyAccessState = .working
+            mediaKeyAccessMessage = "Media-key control is active for this app build."
+            return
+        }
+
+        mediaKeyAccessState = .failedToActivate
+        if !AXIsProcessTrusted() {
+            mediaKeyAccessMessage = "Listening permission appears granted, but the media-key event tap still failed to start. macOS accessibility trust may also be affecting this launch context."
+        } else {
+            mediaKeyAccessMessage = "Listening permission appears granted, but the media-key event tap still failed to activate. Try refreshing or relaunching the app."
+        }
+    }
+
+    func requestMediaKeyAccess() {
+        hasRequestedMediaKeyAccess = true
+        _ = CGRequestListenEventAccess()
+        refreshMediaKeyAccessStatus()
+    }
+
+    deinit {
+        if let mediaKeyRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), mediaKeyRunLoopSource, .commonModes)
+        }
+        if let mediaKeyEventTap {
+            CFMachPortInvalidate(mediaKeyEventTap)
+        }
     }
 
     // MARK: - Connection
@@ -100,6 +194,7 @@ final class AppState: ObservableObject {
         nowPlaying = nil
         isBusy = false
         clearPendingVolume(keepDisplayedVolume: false)
+        volumeHUD.hide()
     }
 
     // MARK: - Polling
@@ -181,9 +276,31 @@ final class AppState: ObservableObject {
         }
 
         guard let speaker else { return }
-        Task {
-            try? await speaker.setVolume(clampedVolume)
+        if !isVolumeHUDSuppressed {
+            volumeHUD.show(
+                title: volumeHUDTitle,
+                volume: clampedVolume
+            )
         }
+        Task {
+            do {
+                try await speaker.setVolume(clampedVolume)
+                try? await Task.sleep(for: .milliseconds(400))
+                await refresh()
+            } catch {
+                clearPendingVolume()
+                await refresh()
+                connectionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func adjustVolume(by delta: Int) {
+        commitVolume(displayedVolume + delta)
+    }
+
+    private var volumeHUDTitle: String {
+        speakerModel.isEmpty ? speakerName : speakerModel
     }
 
     func setSource(_ newSource: SpeakerSource) {
@@ -266,6 +383,88 @@ final class AppState: ObservableObject {
         pendingVolumeResetTask = nil
         if keepDisplayedVolume {
             displayedVolume = volume
+        }
+    }
+
+    private func installMediaKeyEventTap() {
+        guard mediaKeyEventTap == nil else { return }
+
+        let eventMask = CGEventMask(1 << MediaKey.eventType)
+        guard let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let appState = Unmanaged<AppState>.fromOpaque(userInfo).takeUnretainedValue()
+                return appState.handleMediaKeyEvent(type: type, event: event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            return
+        }
+
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+
+        mediaKeyEventTap = eventTap
+        mediaKeyRunLoopSource = runLoopSource
+    }
+
+    private func invalidateMediaKeyEventTap() {
+        if let mediaKeyRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), mediaKeyRunLoopSource, .commonModes)
+            self.mediaKeyRunLoopSource = nil
+        }
+        if let mediaKeyEventTap {
+            CFMachPortInvalidate(mediaKeyEventTap)
+            self.mediaKeyEventTap = nil
+        }
+    }
+
+    private func handleMediaKeyEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let mediaKeyEventTap {
+                CGEvent.tapEnable(tap: mediaKeyEventTap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard isConnected, status == .powerOn else {
+            return Unmanaged.passUnretained(event)
+        }
+        guard let delta = mediaKeyDelta(for: event) else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        adjustVolume(by: delta)
+        return nil
+    }
+
+    private func mediaKeyDelta(for event: CGEvent) -> Int? {
+        guard let nsEvent = NSEvent(cgEvent: event) else { return nil }
+        guard nsEvent.subtype.rawValue == MediaKey.eventSubtype else { return nil }
+
+        let data = Int(nsEvent.data1)
+        let keyCode = (data & 0xFFFF0000) >> 16
+        let keyFlags = data & 0x0000FFFF
+        let isKeyDown = ((keyFlags & 0xFF00) >> 8) == MediaKey.keyDownState
+        let isRepeat = (keyFlags & MediaKey.repeatMask) != 0
+
+        guard isKeyDown || isRepeat else { return nil }
+
+        switch keyCode {
+        case MediaKey.volumeUp:
+            return MediaKey.volumeStep
+        case MediaKey.volumeDown:
+            return -MediaKey.volumeStep
+        default:
+            return nil
         }
     }
 

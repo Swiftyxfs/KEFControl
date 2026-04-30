@@ -5,3 +5,5 @@ DerivedData/
 .DS_Store
 KEFControl.app/
 KEFControl.zip
+.omx/
+.codex/

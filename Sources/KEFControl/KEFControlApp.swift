@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -10,7 +11,7 @@ struct KEFControlApp: App {
             SpeakerMenuView()
                 .environmentObject(appState)
         } label: {
-            Image(systemName: menuBarIcon)
+            Image(systemName: statusItemImageName)
         }
         .menuBarExtraStyle(.window)
 
@@ -20,18 +21,13 @@ struct KEFControlApp: App {
         }
     }
 
-    private var menuBarIcon: String {
-        if appState.isConnected && appState.status == .powerOn {
-            "hifispeaker.fill"
-        } else {
-            "hifispeaker"
-        }
+    private var statusItemImageName: String {
+        appState.isConnected && appState.status == .powerOn ? "hifispeaker.fill" : "hifispeaker"
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hide from Dock — this is a menu bar-only app
         NSApplication.shared.setActivationPolicy(.accessory)
     }
 }
